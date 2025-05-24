@@ -1,54 +1,40 @@
 open System
 open System.Net.Http
+open System.IO
+open System.Threading.Channels
 open System.Threading.Tasks
 
+open Microsoft.AspNetCore.Http
 open Microsoft.AspNetCore.Builder
 open Microsoft.Extensions.Hosting
 
-open FsConfig
+let httpClient = new HttpClient()
 
-open Config
-
-type MessageJson = { role: string; content: string }
-
-type LLMRequestJson =
-    { model: string
-      messages: MessageJson
-      stream: bool }
+let proxyStream1 (ctx: HttpContext) = task {
+    use! res = httpClient.GetAsync("http://localhost:3000/stream", HttpCompletionOption.ResponseHeadersRead)
+    ctx.Response.ContentType <- "text/event-stream"
+    use src = res.Content.ReadAsStream()
+    do! src.CopyToAsync(ctx.Response.Body)
+}
+let proxyStream2 (ctx: HttpContext) = task {
+    use! res = httpClient.GetAsync("http://localhost:3000/stream", HttpCompletionOption.ResponseHeadersRead)
+    ctx.Response.ContentType <- "text/event-stream"
+    use src = new StreamReader(res.Content.ReadAsStream())
+    let writer = new StreamWriter(ctx.Response.Body)
+    while not src.EndOfStream do
+        let! line = src.ReadLineAsync() |> Async.AwaitTask
+        if not (String.IsNullOrWhiteSpace(line)) then
+            do! writer.WriteLineAsync(line) |> Async.AwaitTask
+            do! writer.FlushAsync() |> Async.AwaitTask
+}
 
 [<EntryPoint>]
 let main args =
     let builder = WebApplication.CreateBuilder(args)
     let app = builder.Build()
 
-    app.MapGet("/", Func<string>(fun () -> "Hello World!")) |> ignore
-
-
-    app.MapGet(
-        "/conversations",
-        Func<Task<string>>(fun () ->
-            async {
-                let config =
-                  match EnvConfig.Get<Config>() with
-                  | Ok config -> config
-                  | Error error -> failwith "Failed to load configuration"
-
-                printfn "%A" config.ServerKey
-                // use client = new HttpClient()
-                // client.DefaultRequestHeaders.Add("Authorization","Bearer ${API_KEY}")
-
-                // let request =
-                //     { model = "gpt-4o-mini"
-                //       messages =
-                //         { role = "user"
-                //           content = "Hello, how can I help you?" }
-                //       stream = true }
-                // let! response = clinet.PostAsync()
-                return "Hello World!"
-            }
-            |> Async.StartAsTask)
-    )
-    |> ignore
+    app.MapGet("/proxy-stream1", (fun (ctx: HttpContext) -> proxyStream1 ctx :> Task)) |> ignore
+    app.MapGet("/proxy-stream2", (fun (ctx: HttpContext) -> proxyStream2 ctx :> Task)) |> ignore
 
     app.Run()
 
